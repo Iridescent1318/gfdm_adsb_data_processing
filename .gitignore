@@ -1,0 +1,6 @@
+*.json
+*.csv
+result/*
+*.txt
+!/requirements.txt
+
