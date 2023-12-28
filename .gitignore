@@ -3,4 +3,4 @@
 result/*
 *.txt
 !/requirements.txt
-
+__pycache__/*
