@@ -50,11 +50,12 @@ class GfdmInfoJsonReader(object):
         Returns:
             An integer type of converted UNIX timestamp.
         '''
-        utc_time_part = utc_time_part = utc_time[:23] if '.' in utc_time else utc_time[:19] + '.000'
+        utc_time_part = utc_time_part = utc_time[:
+                                                 23] if '.' in utc_time else utc_time[:19] + '.000'
         dt = datetime.datetime.strptime(
             utc_time_part, format_str).replace(tzinfo=datetime.timezone.utc)
         return int(dt.timestamp())
-    
+
     @staticmethod
     def convert_sds_to_tuple(spatial_data_str: str) -> (Tuple[Tuple[T]], Tuple[T]):
         '''
@@ -121,16 +122,6 @@ class GfdmInfoJsonReader(object):
         polygon_shape = Polygon(polygon)
         return polygon_shape.contains(point_shape)
 
-    # @staticmethod
-    # def convert_utcdouble_to_timestamp(utc_time: str):
-    #     '''
-    #     Convert a UTC 
-    #     '''
-    #     utc_time_part = utc_time[:23] if '.' in utc_time else utc_time[:19] + '.000'
-    #     dt = datetime.datetime.strptime(
-    #         utc_time_part, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=datetime.timezone.utc)
-    #     return int(dt.timestamp())
-
     @staticmethod
     def get_bbox_rel_pos(bbox: Sequence[Sequence[T]], lon: T, lat: T) -> Tuple[T]:
         '''
@@ -149,11 +140,16 @@ class GfdmInfoJsonReader(object):
 
     time_attributes = {'scenestarttime', 'sceneendtime'}
     time_filtering_rels = {'lt', 'le', 'equal', 'ge', 'gt'}
-    json_utc_converter = lambda s: GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, JSON_UTC_FORMAT)
-    csv_utc_converter = lambda s: GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, CSV_UTC_FORMAT)
-        
 
-    def __init__(self, fname) -> None:
+    @staticmethod
+    def json_utc_converter(
+        s): return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, JSON_UTC_FORMAT)
+
+    @staticmethod
+    def csv_utc_converter(
+        s): return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, CSV_UTC_FORMAT)
+
+    def __init__(self, fname):
         self.fname = fname
         with open(self.fname) as f:
             self.info = json.load(f)['RECORDS']
@@ -161,8 +157,10 @@ class GfdmInfoJsonReader(object):
             record['group_name'] = record['sceneid'][:33]
             # record['scenestarttime_dt'] = record['scenestarttime']
             # record['sceneendtime_dt'] = record['sceneendtime']
-            record['scenestarttime'] = GfdmInfoJsonReader.json_utc_converter(record['scenestarttime'])
-            record['sceneendtime'] = GfdmInfoJsonReader.json_utc_converter(record['sceneendtime'])
+            record['scenestarttime'] = GfdmInfoJsonReader.json_utc_converter(
+                record['scenestarttime'])
+            record['sceneendtime'] = GfdmInfoJsonReader.json_utc_converter(
+                record['sceneendtime'])
             record['spatialdata'], record['bbox'] = GfdmInfoJsonReader.convert_sds_to_tuple(
                 record['spatialdata'])
 
@@ -189,13 +187,13 @@ class GfdmInfoJsonReader(object):
         '''
         self.query_df = pd.DataFrame.copy(self.info_df)
 
-    def get_query_df(self):
+    def get_query_df(self) -> pd.DataFrame:
         return self.query_df
 
-    def get_groupby_df(self):
+    def get_groupby_df(self) -> pd.DataFrame:
         return self.groupby_df
 
-    def time_filter(self, time_attribute: str, rel: str, utc_time_str: str):
+    def time_filter(self, time_attribute: str, rel: str, utc_time_str: str) -> "GfdmInfoJsonReader":
         '''
         Filter records which satisfy the given time condition.
         '''
@@ -217,7 +215,7 @@ class GfdmInfoJsonReader(object):
         self.query_df = df[criteria]
         return self
 
-    def space_filter(self, points):
+    def space_filter(self, points) -> "GfdmInfoJsonReader":
         '''
         Filter records which contain at least one point from the input points.
         '''
@@ -230,7 +228,7 @@ class GfdmInfoJsonReader(object):
     @staticmethod
     def opensky_query(df: pd.DataFrame) -> None:
         '''
-        
+
         '''
         with open('done.txt', 'r', encoding='utf-8') as f_in:
             done = set(l[:-1] for l in f_in.readlines())
@@ -258,7 +256,7 @@ class GfdmInfoJsonReader(object):
             print(e)
 
     @staticmethod
-    def process(path: str):
+    def process(path: str) -> pd.DataFrame:
         file_list = os.listdir(path)
         np_list = []
         data_head = None
