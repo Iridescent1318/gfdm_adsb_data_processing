@@ -10,24 +10,7 @@ from shapely.geometry import Point, Polygon
 from traffic.data import opensky
 from tqdm import tqdm
 
-
-GFDM_INFO_JSON_NAME = 'gt_m_cat_test.json'
-AIRPORT_POS = {
-    "hongkong": (22.308046, 113.918480),
-    "tokyo_haneda": (35.553333, 139.781113),
-    "tokyo_narita": (35.765786, 140.386347),
-    "shanghai_hongqiao": (31.197736, 121.334566),
-    "shanghai_pudong": (31.143333, 121.805275),
-    "singapore_changi": (1.359167, 103.989441),
-    "beijing_capital": (40.072498, 116.597504),
-}
-POINTS = [v for _, v in AIRPORT_POS.items()]
-TIME_DIFF = 1
-EPS = 1e-6
-
-JSON_UTC_FORMAT = '%Y-%m-%dT%H:%M:%S.%f'
-CSV_UTC_FORMAT = '%Y-%m-%d %H:%M:%S.%f'
-T = TypeVar('T', int, float)
+T = TypeVar('T')
 
 
 class GfdmInfoJsonReader(object):
@@ -37,6 +20,13 @@ class GfdmInfoJsonReader(object):
     Attributes:
         fname (str): the filename of the JSON file.
     '''
+    TIME_ATTRIBUTES = {'scenestarttime', 'sceneendtime'}
+    TIME_FILTER_RELS = {'lt', 'le', 'equal', 'ge', 'gt'}
+    TIME_DIFF = 1
+    EPS = 1e-6
+    JSON_UTC_FORMAT = '%Y-%m-%dT%H:%M:%S.%f'
+    CSV_UTC_FORMAT = '%Y-%m-%d %H:%M:%S.%f'
+
     @staticmethod
     def convert_utcstr_to_timestamp(utc_time: str, format_str: str) -> int:
         '''
@@ -136,27 +126,116 @@ class GfdmInfoJsonReader(object):
             A tuple with two elements. The first element is the relative position with respect to longitude,
             and the second latitude.
         '''
-        return ((lon - bbox[0]) / (bbox[2] - bbox[0] + EPS), (lat - bbox[1]) / (bbox[3] - bbox[1] + EPS))
-
-    time_attributes = {'scenestarttime', 'sceneendtime'}
-    time_filtering_rels = {'lt', 'le', 'equal', 'ge', 'gt'}
+        return ((lon - bbox[0]) / (bbox[2] - bbox[0] + GfdmInfoJsonReader.EPS),
+                (lat - bbox[1]) / (bbox[3] - bbox[1] + GfdmInfoJsonReader.EPS))
 
     @staticmethod
     def json_utc_converter(
-        s): return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, JSON_UTC_FORMAT)
+        s): return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, GfdmInfoJsonReader.JSON_UTC_FORMAT)
 
     @staticmethod
     def csv_utc_converter(
-        s): return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, CSV_UTC_FORMAT)
+        s): return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, GfdmInfoJsonReader.CSV_UTC_FORMAT)
 
-    def __init__(self, fname):
+    @staticmethod
+    def opensky_query(df: pd.DataFrame, log_path: str = './done.txt',
+                      output_dir: str = './result', resume: bool = True) -> None:
+        '''
+        Get historical flight information using cleaned JSON metadata by the API of `traffic`.
+
+        The JSON metadata is grouped by sceneid prefix [0:position_of_last_underscore] (e.g. 
+        DM01_PMS_013469_20230102_KS5M1_02_022 -> DM01_PMS_013469_20230102_KS5M1_02) and cleaned
+        during the initialization of the class. Each group will produce a CSV file containing
+        all ADS-B messages during the imaging period.
+
+        Note: if the data is too much, the inquiry may stuck occasionally. This issue is to be
+            troubleshot in the future. Just try more times with resume=True.
+
+        Args:
+            df: the cleaned pandas dataframe.
+            log_path: the path of the log file. The log file is used as checkpoints.
+            output_dir: the output directory path of saved CSV files.
+            resume: True if resume from the current log, otherwise False.
+        '''
+        mode = 'a+' if resume else 'w'
+        if resume:
+            with open(log_path, 'r', encoding='utf-8') as f_in:
+                done = set(l[:-1] for l in f_in.readlines())
+        else:
+            done = set()
+        try:
+            with open(log_path, mode, encoding='utf-8') as f_in:
+                with tqdm(total=df.shape[0] - len(done)) as pbar:
+                    for index, row in df.iterrows():
+                        if index in done:
+                            continue
+                        start_time = row['scenestarttime']
+                        stop_time = row['sceneendtime']
+                        bounds = row['bbox']
+                        traffic = opensky.history(
+                            start=start_time,
+                            stop=stop_time,
+                            bounds=bounds
+                        )
+                        if traffic is not None:
+                            traffic.data.to_csv(os.path.join(
+                                output_dir, f'{index}.csv'))
+                            f_in.write(index + '\n')
+                            print(f"{index} traffic information found and saved")
+                        time.sleep(0.1)
+                        pbar.update(1)
+        except Exception as e:
+            print(e)
+
+    @staticmethod
+    def process_queried_csv(csv_dir_path: str) -> pd.DataFrame:
+        '''
+        Process all the CSV files produced by opensky_query().
+
+        Args:
+            csv_dir_path: the CSV file directory path.
+
+        Returns:
+            A pandas dataframe containing cleaned flight data.
+        '''
+        file_list = os.listdir(csv_dir_path)
+        np_list = []
+        data_head = None
+        for fl in file_list:
+            fname = fl[:33]
+            file_df = pd.read_csv(os.path.join(csv_dir_path, fl))
+            file_df['group_name'] = fname
+            if data_head is None:
+                data_head = file_df.columns.values
+            file_list = file_df.to_numpy()
+            np_list.append(file_list)
+        np_stack_list = np.vstack(np_list)
+
+        # Convert to dataframe and cleaning
+        ret = pd.DataFrame(np_stack_list, columns=data_head)
+        ret = ret.drop(columns=['Unnamed: 0', 'alert', 'spi', 'squawk'])
+        # Convert to UNIX timestamp
+        ret['last_position'] = ret['last_position'].apply(
+            GfdmInfoJsonReader.csv_utc_converter)
+        ret['hour'] = ret['hour'].apply(
+            GfdmInfoJsonReader.csv_utc_converter)
+        ret['timestamp'] = ret['timestamp'].apply(
+            GfdmInfoJsonReader.csv_utc_converter)
+        # Drop rows with null ground speed
+        ret = ret[ret['groundspeed'].notnull()]
+        # last_position denotes the last time when the ADS-B message of the plane is recorded
+        # This is to filter 'fresh' messages
+        ret = ret[ret.apply(lambda x: abs(x['last_position'] -
+                            x['timestamp']) <= GfdmInfoJsonReader.TIME_DIFF, axis=1)]
+
+        return ret
+
+    def __init__(self, fname) -> None:
         self.fname = fname
         with open(self.fname) as f:
             self.info = json.load(f)['RECORDS']
         for record in self.info:
             record['group_name'] = record['sceneid'][:33]
-            # record['scenestarttime_dt'] = record['scenestarttime']
-            # record['sceneendtime_dt'] = record['sceneendtime']
             record['scenestarttime'] = GfdmInfoJsonReader.json_utc_converter(
                 record['scenestarttime'])
             record['sceneendtime'] = GfdmInfoJsonReader.json_utc_converter(
@@ -168,8 +247,8 @@ class GfdmInfoJsonReader(object):
         self.query_df = pd.DataFrame.copy(self.info_df)
 
         self.groupby_df = self.info_df.groupby('group_name').agg({
-            'scenestarttime': np.min,
-            'sceneendtime': np.max,
+            'scenestarttime': 'min',
+            'sceneendtime': 'max',
             'bbox': GfdmInfoJsonReader.get_max_bbox_tuple,
             'spatialdata': lambda x: x,
             'sceneid': lambda x: x
@@ -196,10 +275,19 @@ class GfdmInfoJsonReader(object):
     def time_filter(self, time_attribute: str, rel: str, utc_time_str: str) -> "GfdmInfoJsonReader":
         '''
         Filter records which satisfy the given time condition.
+
+        Args:
+            time_attribute: time related attributes. Takes 'scenestarttime' or 'sceneendtime'.
+            rel: the comparator in the criteria. Takes 'gt'(greater than), 'ge'(greater than or equal to),
+                'equal', 'le'(less than or equal) and 'lt'(less than).
+            utc_time_str: the UTC time string from JSON metadata in '%Y-%m-%dT%H:%M:%S'
+
+        Returns:
+            The object itself (to support method chaining).
         '''
         df = self.query_df
-        assert (time_attribute in GfdmInfoJsonReader.time_attributes)
-        assert (rel in GfdmInfoJsonReader.time_filtering_rels)
+        assert (time_attribute in GfdmInfoJsonReader.TIME_ATTRIBUTES)
+        assert (rel in GfdmInfoJsonReader.TIME_FILTER_RELS)
         utc_timestamp = GfdmInfoJsonReader.json_utc_converter(utc_time_str)
         criteria = None
         if rel == 'gt':
@@ -215,110 +303,18 @@ class GfdmInfoJsonReader(object):
         self.query_df = df[criteria]
         return self
 
-    def space_filter(self, points) -> "GfdmInfoJsonReader":
+    def space_filter(self, points: Sequence[Sequence[T]]) -> "GfdmInfoJsonReader":
         '''
         Filter records which contain at least one point from the input points.
+
+        Args:
+            points: a sequence of input points.
+
+        Returns:
+            The object itself (to support method chaining).
         '''
         df = self.query_df
         criteria = df['spatialdata'].apply(lambda x: True if len(
             points) == 0 else np.any([GfdmInfoJsonReader.check_if_inside_the_polygon(x, point) for point in points]))
         self.query_df = df[criteria]
         return self
-
-    @staticmethod
-    def opensky_query(df: pd.DataFrame) -> None:
-        '''
-
-        '''
-        with open('done.txt', 'r', encoding='utf-8') as f_in:
-            done = set(l[:-1] for l in f_in.readlines())
-        try:
-            with tqdm(total=df.shape[0] - len(done)) as pbar:
-                for index, row in df.iterrows():
-                    if index in done:
-                        continue
-                    start_time = row['scenestarttime']
-                    stop_time = row['sceneendtime']
-                    bounds = row['bbox']
-                    traffic = opensky.history(
-                        start=start_time,
-                        stop=stop_time,
-                        bounds=bounds
-                    )
-                    if traffic is not None:
-                        traffic.data.to_csv(f'result\\{index}.csv')
-                        print(f"{index} traffic information found and saved")
-                    with open('done.txt', 'a+', encoding='utf-8') as f_in:
-                        f_in.write(index + '\n')
-                    time.sleep(0.5)
-                    pbar.update(1)
-        except Exception as e:
-            print(e)
-
-    @staticmethod
-    def process(path: str) -> pd.DataFrame:
-        file_list = os.listdir(path)
-        np_list = []
-        data_head = None
-        for fl in file_list:
-            fname = fl[:33]
-            file_df = pd.read_csv(os.path.join(path, fl))
-            file_df['group_name'] = fname
-            if data_head is None:
-                data_head = file_df.columns.values
-            file_list = file_df.to_numpy()
-            np_list.append(file_list)
-        np_stack_list = np.vstack(np_list)
-
-        ret = pd.DataFrame(np_stack_list, columns=data_head)
-        ret = ret.drop(columns=['Unnamed: 0', 'alert', 'spi', 'squawk'])
-        ret['last_position'] = ret['last_position'].apply(
-            GfdmInfoJsonReader.csv_utc_converter)
-        ret['hour'] = ret['hour'].apply(
-            GfdmInfoJsonReader.csv_utc_converter)
-        ret['timestamp'] = ret['timestamp'].apply(
-            GfdmInfoJsonReader.csv_utc_converter)
-        ret = ret[ret['groundspeed'].notnull()]
-        ret = ret[ret.apply(lambda x: abs(x['last_position'] -
-                            x['timestamp']) <= TIME_DIFF, axis=1)]
-
-        return ret
-
-
-if __name__ == '__main__':
-    gfdm = GfdmInfoJsonReader(GFDM_INFO_JSON_NAME)
-
-    GfdmInfoJsonReader.opensky_query(gfdm.get_groupby_df())
-
-    gfdm_df = gfdm.info_df
-    gfdm_df = gfdm_df.drop(columns=['jobtaskid', 'satelliteid'])
-    print(gfdm_df)
-    np_df = GfdmInfoJsonReader.process('result')
-    print(np_df)
-
-    new_df = gfdm_df.merge(np_df, how='right', on='group_name')
-    new_df = new_df[new_df.apply(lambda x: abs(x['scenestarttime'] - x['timestamp'])
-                                 <= TIME_DIFF and abs(x['sceneendtime'] - x['timestamp']) <= TIME_DIFF, axis=1)]
-    new_df = new_df[new_df.apply(lambda x: GfdmInfoJsonReader.check_if_inside_the_polygon(
-        x['spatialdata'], (x['longitude'], x['latitude'])), axis=1)]
-    new_df['diff'] = new_df.apply(
-        lambda x: x['timestamp'] - x['scenestarttime'], axis=1)
-    new_df['rel_pos'] = new_df.apply(lambda x: GfdmInfoJsonReader.get_bbox_rel_pos(
-        x['bbox'], x['longitude'], x['latitude']), axis=1)
-    print(new_df)
-    new_df.to_csv('final.csv')
-
-    ndf_groupby = new_df.groupby('sceneid')
-    ndf = ndf_groupby.agg({
-        'scenestarttime': 'min',
-        'sceneendtime': 'max',
-        # 'bbox': lambda x: x[0],
-        # 'spatialdata': lambda x: x,
-        # 'sceneid': lambda x: x
-        'rel_pos': lambda x: x
-    })
-    ndf['plane_count'] = ndf_groupby.agg({
-        'icao24': lambda x: len(set(x)),
-    })
-    ndf.sort_values(by='plane_count', ascending=False).to_csv(
-        'final_sceneid.csv')
