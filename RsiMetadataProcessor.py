@@ -2,9 +2,10 @@ import json
 import datetime
 import time
 import os
-from typing import Tuple, Sequence, TypeVar, Any
 import logging
 import shelve
+import hashlib
+from typing import Tuple, Sequence, TypeVar, Any
 
 import numpy as np
 import pandas as pd
@@ -16,13 +17,15 @@ T = TypeVar('T')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+
 class RsiMetadataProcessor(object):
     '''
     The class of GFDM JSON metadata reader & processor.
 
     Attributes:
-        fname (str): the filename of the JSON file.
+        fpath (str): the filepath of the JSON file.
     '''
+    TARGET_SCENE_ID_PATH = 'rmp_cache'
     TIME_ATTRIBUTES = {'scenestarttime', 'sceneendtime'}
     TIME_FILTER_RELS = {'lt', 'le', 'equal', 'ge', 'gt'}
     TIME_DIFF = 1
@@ -151,8 +154,7 @@ class RsiMetadataProcessor(object):
             return s
         return RsiMetadataProcessor.convert_utcstr_to_timestamp(s, RsiMetadataProcessor.CSV_UTC_FORMAT)
 
-    def historical_adsb_query(self, log_path: str = './done.txt',
-                              output_dir: str = './result', resume: bool = True) -> None:
+    def historical_adsb_query(self, save_output: bool = True, output_dir: str = './result') -> None:
         '''
         Get historical flight information using cleaned JSON metadata by the API of `traffic`.
 
@@ -170,41 +172,38 @@ class RsiMetadataProcessor(object):
             resume: True if resume from the current log, otherwise False.
         '''
         df = self.get_groupby_df()
-        mode = 'a+' if resume else 'w'
-        if resume:
-            with open(log_path, 'r', encoding='utf-8') as f_in:
-                done = set(l[:-1] for l in f_in.readlines())
-        else:
-            done = set()
         try:
-            with open(log_path, mode, encoding='utf-8') as f_in:
-                with tqdm(total=df.shape[0] - len(done)) as pbar:
+            if not os.path.exists(RsiMetadataProcessor.TARGET_SCENE_ID_PATH):
+                os.mkdir(RsiMetadataProcessor.TARGET_SCENE_ID_PATH)
+            with shelve.open(os.path.join(RsiMetadataProcessor.TARGET_SCENE_ID_PATH, self.fname + '_' + self.id_suffix)) as db:
+                if 'target_scene_ids' not in db:
+                    db['target_scene_ids'] = dict()
+                with tqdm(total=df.shape[0] - len(db['target_scene_ids'])) as pbar:
                     for index, row in df.iterrows():
-                        if index in done:
+                        if index in db['target_scene_ids']:
                             continue
-                        start_time = row['scenestarttime']
-                        stop_time = row['sceneendtime']
-                        bounds = row['bbox']
                         traffic = opensky.history(
-                            start=start_time,
-                            stop=stop_time,
-                            bounds=bounds
+                            start=row['scenestarttime'],
+                            stop=row['sceneendtime'],
+                            bounds=row['bbox']
                         )
                         if traffic is not None:
-                            if not os.path.exists(output_dir):
-                                logger.warning(
-                                    f"The path {output_dir} does not exist. Trying to mkdir.")
-                                os.mkdir(output_dir)
-                            traffic.data.to_csv(os.path.join(
-                                output_dir, f'{index}.csv'))
-                            f_in.write(index + '\n')
+                            if save_output:
+                                if not os.path.exists(output_dir):
+                                    logger.warning(
+                                        f"The output path {output_dir} does not exist. Trying to mkdir.")
+                                    os.mkdir(output_dir)
+                                traffic.data.to_csv(os.path.join(
+                                    output_dir, f'{index}.csv'))
+                            db['target_scene_ids'][index] = traffic.data
                             logger.info(
                                 f"{index} traffic information found and saved")
-                        logger.debug("debug test")
                         time.sleep(0.1)
                         pbar.update(1)
+                print(db['target_scene_ids'])
         except Exception as e:
-            logging.error(e)
+            logger.exception(e)
+        return 
 
     @staticmethod
     def process_queried_csv(csv_dir_path: str) -> pd.DataFrame:
@@ -249,9 +248,12 @@ class RsiMetadataProcessor(object):
 
         return ret
 
-    def __init__(self, fname) -> None:
-        self.fname = fname
-        with open(self.fname) as f:
+    def __init__(self, fpath) -> None:
+        self.fpath = fpath
+        self.fname, _ = os.path.splitext(os.path.basename(fpath))
+        self.id_suffix = hashlib.md5(
+            self.fname.encode("utf-8")).hexdigest()[-4:]
+        with open(self.fpath) as f:
             self.info = json.load(f)['RECORDS']
         for record in self.info:
             record['group_name'] = record['sceneid'][:33]
@@ -381,7 +383,7 @@ if __name__ == "__main__":
     GFDM_INFO_JSON_NAME = 'gt_m_cat_test.json'
     rsi_metadata_processor = RsiMetadataProcessor(GFDM_INFO_JSON_NAME)
 
-    rsi_metadata_processor.historical_adsb_query(resume=False)
+    rsi_metadata_processor.historical_adsb_query()
 
     gfdm_df = get_gfdm_df(rsi_metadata_processor)
     logging.debug(gfdm_df)
@@ -390,6 +392,6 @@ if __name__ == "__main__":
     new_df = get_cleaned_df(gfdm_df, np_df)
     logging.debug(new_df)
 
-    new_df.to_csv('final.csv')
+    # new_df.to_csv('final.csv')
     final_df = get_groupby_df(new_df)
-    final_df.to_csv('final_sceneid.csv')
+    # final_df.to_csv('final_sceneid.csv')

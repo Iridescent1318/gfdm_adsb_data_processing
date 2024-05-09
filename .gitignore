@@ -5,3 +5,4 @@ result/*
 !/requirements.txt
 __pycache__
 localdata
+rmp_cache
