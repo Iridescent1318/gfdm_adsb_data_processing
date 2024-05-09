@@ -2,7 +2,7 @@ import json
 import datetime
 import time
 import os
-from typing import Tuple, Sequence, TypeVar
+from typing import Tuple, Sequence, TypeVar, Any
 
 import numpy as np
 import pandas as pd
@@ -13,7 +13,7 @@ from tqdm import tqdm
 T = TypeVar('T')
 
 
-class GfdmInfoJsonReader(object):
+class RsiMetadataProcessor(object):
     '''
     The class of GFDM JSON metadata reader & processor.
 
@@ -40,14 +40,13 @@ class GfdmInfoJsonReader(object):
         Returns:
             An integer type of converted UNIX timestamp.
         '''
-        utc_time_part = utc_time_part = utc_time[:
-                                                 23] if '.' in utc_time else utc_time[:19] + '.000'
+        utc_time_part = utc_time[:23] if '.' in utc_time else utc_time[:19] + '.000'
         dt = datetime.datetime.strptime(
             utc_time_part, format_str).replace(tzinfo=datetime.timezone.utc)
         return int(dt.timestamp())
 
     @staticmethod
-    def convert_sds_to_tuple(spatial_data_str: str) -> (Tuple[Tuple[T]], Tuple[T]):
+    def convert_sds_to_tuple(spatial_data_str: str) -> Tuple[Tuple[Tuple[T]], Tuple[T]]:
         '''
         Convert a spatial data string containing four longitude-latitude coordinates to a 
         four-element tuple (min_longitude, min_latitude, max_longitude, max_latitude).
@@ -130,12 +129,24 @@ class GfdmInfoJsonReader(object):
                 (lat - bbox[1]) / (bbox[3] - bbox[1] + GfdmInfoJsonReader.EPS))
 
     @staticmethod
-    def json_utc_converter(
-        s): return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, GfdmInfoJsonReader.JSON_UTC_FORMAT)
+    def json_utc_converter(s: int | float | str | None) -> int:
+        if s is None:
+            return -1
+        elif isinstance(s, float):
+            return int(s)
+        elif isinstance(s, int):
+            return s
+        return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, GfdmInfoJsonReader.JSON_UTC_FORMAT)
 
     @staticmethod
-    def csv_utc_converter(
-        s): return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, GfdmInfoJsonReader.CSV_UTC_FORMAT)
+    def csv_utc_converter(s: int | float | str | None) -> int:
+        if s is None:
+            return -1
+        elif isinstance(s, float):
+            return int(s)
+        elif isinstance(s, int):
+            return s
+        return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, GfdmInfoJsonReader.CSV_UTC_FORMAT)
 
     @staticmethod
     def opensky_query(df: pd.DataFrame, log_path: str = './done.txt',
