@@ -3,6 +3,8 @@ import datetime
 import time
 import os
 from typing import Tuple, Sequence, TypeVar, Any
+import logging
+import shelve
 
 import numpy as np
 import pandas as pd
@@ -11,7 +13,8 @@ from traffic.data import opensky
 from tqdm import tqdm
 
 T = TypeVar('T')
-
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class RsiMetadataProcessor(object):
     '''
@@ -125,8 +128,8 @@ class RsiMetadataProcessor(object):
             A tuple with two elements. The first element is the relative position with respect to longitude,
             and the second latitude.
         '''
-        return ((lon - bbox[0]) / (bbox[2] - bbox[0] + GfdmInfoJsonReader.EPS),
-                (lat - bbox[1]) / (bbox[3] - bbox[1] + GfdmInfoJsonReader.EPS))
+        return ((lon - bbox[0]) / (bbox[2] - bbox[0] + RsiMetadataProcessor.EPS),
+                (lat - bbox[1]) / (bbox[3] - bbox[1] + RsiMetadataProcessor.EPS))
 
     @staticmethod
     def json_utc_converter(s: int | float | str | None) -> int:
@@ -136,7 +139,7 @@ class RsiMetadataProcessor(object):
             return int(s)
         elif isinstance(s, int):
             return s
-        return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, GfdmInfoJsonReader.JSON_UTC_FORMAT)
+        return RsiMetadataProcessor.convert_utcstr_to_timestamp(s, RsiMetadataProcessor.JSON_UTC_FORMAT)
 
     @staticmethod
     def csv_utc_converter(s: int | float | str | None) -> int:
@@ -146,11 +149,10 @@ class RsiMetadataProcessor(object):
             return int(s)
         elif isinstance(s, int):
             return s
-        return GfdmInfoJsonReader.convert_utcstr_to_timestamp(s, GfdmInfoJsonReader.CSV_UTC_FORMAT)
+        return RsiMetadataProcessor.convert_utcstr_to_timestamp(s, RsiMetadataProcessor.CSV_UTC_FORMAT)
 
-    @staticmethod
-    def opensky_query(df: pd.DataFrame, log_path: str = './done.txt',
-                      output_dir: str = './result', resume: bool = True) -> None:
+    def historical_adsb_query(self, log_path: str = './done.txt',
+                              output_dir: str = './result', resume: bool = True) -> None:
         '''
         Get historical flight information using cleaned JSON metadata by the API of `traffic`.
 
@@ -163,11 +165,11 @@ class RsiMetadataProcessor(object):
             troubleshot in the future. Just try more times with resume=True.
 
         Args:
-            df: the cleaned pandas dataframe.
             log_path: the path of the log file. The log file is used as checkpoints.
             output_dir: the output directory path of saved CSV files.
             resume: True if resume from the current log, otherwise False.
         '''
+        df = self.get_groupby_df()
         mode = 'a+' if resume else 'w'
         if resume:
             with open(log_path, 'r', encoding='utf-8') as f_in:
@@ -189,14 +191,20 @@ class RsiMetadataProcessor(object):
                             bounds=bounds
                         )
                         if traffic is not None:
+                            if not os.path.exists(output_dir):
+                                logger.warn(
+                                    f"The path {output_dir} does not exist. Trying to mkdir.")
+                                os.mkdir(output_dir)
                             traffic.data.to_csv(os.path.join(
                                 output_dir, f'{index}.csv'))
                             f_in.write(index + '\n')
-                            print(f"{index} traffic information found and saved")
+                            logger.info(
+                                f"{index} traffic information found and saved")
+                        logger.debug("debug test")
                         time.sleep(0.1)
                         pbar.update(1)
         except Exception as e:
-            print(e)
+            logging.error(e)
 
     @staticmethod
     def process_queried_csv(csv_dir_path: str) -> pd.DataFrame:
@@ -227,17 +235,17 @@ class RsiMetadataProcessor(object):
         ret = ret.drop(columns=['Unnamed: 0', 'alert', 'spi', 'squawk'])
         # Convert to UNIX timestamp
         ret['last_position'] = ret['last_position'].apply(
-            GfdmInfoJsonReader.csv_utc_converter)
+            RsiMetadataProcessor.csv_utc_converter)
         ret['hour'] = ret['hour'].apply(
-            GfdmInfoJsonReader.csv_utc_converter)
+            RsiMetadataProcessor.csv_utc_converter)
         ret['timestamp'] = ret['timestamp'].apply(
-            GfdmInfoJsonReader.csv_utc_converter)
+            RsiMetadataProcessor.csv_utc_converter)
         # Drop rows with null ground speed
         ret = ret[ret['groundspeed'].notnull()]
         # last_position denotes the last time when the ADS-B message of the plane is recorded
         # This is to filter 'fresh' messages
         ret = ret[ret.apply(lambda x: abs(x['last_position'] -
-                            x['timestamp']) <= GfdmInfoJsonReader.TIME_DIFF, axis=1)]
+                            x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)]
 
         return ret
 
@@ -247,11 +255,11 @@ class RsiMetadataProcessor(object):
             self.info = json.load(f)['RECORDS']
         for record in self.info:
             record['group_name'] = record['sceneid'][:33]
-            record['scenestarttime'] = GfdmInfoJsonReader.json_utc_converter(
+            record['scenestarttime'] = RsiMetadataProcessor.json_utc_converter(
                 record['scenestarttime'])
-            record['sceneendtime'] = GfdmInfoJsonReader.json_utc_converter(
+            record['sceneendtime'] = RsiMetadataProcessor.json_utc_converter(
                 record['sceneendtime'])
-            record['spatialdata'], record['bbox'] = GfdmInfoJsonReader.convert_sds_to_tuple(
+            record['spatialdata'], record['bbox'] = RsiMetadataProcessor.convert_sds_to_tuple(
                 record['spatialdata'])
 
         self.info_df = pd.DataFrame.from_dict(self.info)
@@ -260,7 +268,7 @@ class RsiMetadataProcessor(object):
         self.groupby_df = self.info_df.groupby('group_name').agg({
             'scenestarttime': 'min',
             'sceneendtime': 'max',
-            'bbox': GfdmInfoJsonReader.get_max_bbox_tuple,
+            'bbox': RsiMetadataProcessor.get_max_bbox_tuple,
             'spatialdata': lambda x: x,
             'sceneid': lambda x: x
         })
@@ -283,7 +291,7 @@ class RsiMetadataProcessor(object):
     def get_groupby_df(self) -> pd.DataFrame:
         return self.groupby_df
 
-    def time_filter(self, time_attribute: str, rel: str, utc_time_str: str) -> "GfdmInfoJsonReader":
+    def time_filter(self, time_attribute: str, rel: str, utc_time_str: str) -> "RsiMetadataProcessor":
         '''
         Filter records which satisfy the given time condition.
 
@@ -297,9 +305,9 @@ class RsiMetadataProcessor(object):
             The object itself (to support method chaining).
         '''
         df = self.query_df
-        assert (time_attribute in GfdmInfoJsonReader.TIME_ATTRIBUTES)
-        assert (rel in GfdmInfoJsonReader.TIME_FILTER_RELS)
-        utc_timestamp = GfdmInfoJsonReader.json_utc_converter(utc_time_str)
+        assert (time_attribute in RsiMetadataProcessor.TIME_ATTRIBUTES)
+        assert (rel in RsiMetadataProcessor.TIME_FILTER_RELS)
+        utc_timestamp = RsiMetadataProcessor.json_utc_converter(utc_time_str)
         criteria = None
         if rel == 'gt':
             criteria = df[time_attribute] > utc_timestamp
@@ -314,7 +322,7 @@ class RsiMetadataProcessor(object):
         self.query_df = df[criteria]
         return self
 
-    def space_filter(self, points: Sequence[Sequence[T]]) -> "GfdmInfoJsonReader":
+    def space_filter(self, points: Sequence[Sequence[T]]) -> "RsiMetadataProcessor":
         '''
         Filter records which contain at least one point from the input points.
 
@@ -326,6 +334,6 @@ class RsiMetadataProcessor(object):
         '''
         df = self.query_df
         criteria = df['spatialdata'].apply(lambda x: True if len(
-            points) == 0 else np.any([GfdmInfoJsonReader.check_if_inside_the_polygon(x, point) for point in points]))
+            points) == 0 else np.any([RsiMetadataProcessor.check_if_inside_the_polygon(x, point) for point in points]))
         self.query_df = df[criteria]
         return self

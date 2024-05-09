@@ -1,24 +1,26 @@
+import logging
+
 import pandas as pd
-from GfdmInfoJsonReader import GfdmInfoJsonReader
+from RsiMetadataProcessor import RsiMetadataProcessor
 
 GFDM_INFO_JSON_NAME = 'gt_m_cat_test.json'
 
 
-def get_gfdm_df(gfdm: GfdmInfoJsonReader) -> pd.DataFrame:
-    gfdm_df = gfdm.info_df
+def get_gfdm_df(rsi_metadata_processor: RsiMetadataProcessor) -> pd.DataFrame:
+    gfdm_df = rsi_metadata_processor.info_df
     gfdm_df = gfdm_df.drop(columns=['jobtaskid', 'satelliteid'])
     return gfdm_df
 
 
 def get_cleaned_df(gfdm_df: pd.DataFrame, np_df: pd.DataFrame) -> pd.DataFrame:
     new_df = gfdm_df.merge(np_df, how='right', on='group_name')
-    new_df = new_df[new_df.apply(lambda x: abs(x['scenestarttime'] - x['timestamp']) <= GfdmInfoJsonReader.TIME_DIFF and abs(
-        x['sceneendtime'] - x['timestamp']) <= GfdmInfoJsonReader.TIME_DIFF, axis=1)]
-    new_df = new_df[new_df.apply(lambda x: GfdmInfoJsonReader.check_if_inside_the_polygon(
+    new_df = new_df[new_df.apply(lambda x: abs(x['scenestarttime'] - x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF and abs(
+        x['sceneendtime'] - x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)]
+    new_df = new_df[new_df.apply(lambda x: RsiMetadataProcessor.check_if_inside_the_polygon(
         x['spatialdata'], (x['longitude'], x['latitude'])), axis=1)]
     new_df['diff'] = new_df.apply(
         lambda x: x['timestamp'] - x['scenestarttime'], axis=1)
-    new_df['rel_pos'] = new_df.apply(lambda x: GfdmInfoJsonReader.get_bbox_rel_pos(
+    new_df['rel_pos'] = new_df.apply(lambda x: RsiMetadataProcessor.get_bbox_rel_pos(
         x['bbox'], x['longitude'], x['latitude']), axis=1)
     return new_df
 
@@ -40,16 +42,16 @@ def get_groupby_df(cleaned_df: pd.DataFrame) -> pd.DataFrame:
 
 
 if __name__ == '__main__':
-    gfdm = GfdmInfoJsonReader(GFDM_INFO_JSON_NAME)
+    rsi_metadata_processor = RsiMetadataProcessor(GFDM_INFO_JSON_NAME)
 
-    GfdmInfoJsonReader.opensky_query(gfdm.get_groupby_df(), resume=False)
+    rsi_metadata_processor.historical_adsb_query(resume=False)
 
-    gfdm_df = get_gfdm_df(gfdm)
-    print(gfdm_df)
-    np_df = GfdmInfoJsonReader.process_queried_csv('result')
-    print(np_df)
+    gfdm_df = get_gfdm_df(rsi_metadata_processor)
+    logging.debug(gfdm_df)
+    np_df = RsiMetadataProcessor.process_queried_csv('result')
+    logging.debug(np_df)
     new_df = get_cleaned_df(gfdm_df, np_df)
-    print(new_df)
+    logging.debug(new_df)
 
     new_df.to_csv('final.csv')
     final_df = get_groupby_df(new_df)
