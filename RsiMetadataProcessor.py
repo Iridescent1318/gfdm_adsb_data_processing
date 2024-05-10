@@ -5,6 +5,7 @@ import os
 import logging
 import shelve
 import hashlib
+import shutil
 from typing import Tuple, Sequence, TypeVar, Any
 
 import numpy as np
@@ -30,6 +31,8 @@ class RsiMetadataProcessor(object):
         target_adsb_ids (dict): saved target scene ids and corresponding dataframes.
         original_df (pd.Dataframe): original dataframe from the given JSON file.
         filtered_df (pd.Dataframe): filtered dataframe from the original one.
+        group_name_join_df (pd.Dataframe): the dataframe joined with ADS-B.
+        plane_count_df (pd.Dataframe): the dataframe for plane count. Depend on group_name_join_df.
         groupby_df (pd.Dataframe): grouped version of the original one.
     '''
     TARGET_SCENE_ID_PATH = 'rmp_cache'
@@ -88,7 +91,7 @@ class RsiMetadataProcessor(object):
         Given a list of an oblique bounding box coordinates, return its minimal circumscribed rectangle 
         whose edges are parallel to lines of longitude and latitude.
 
-        Note: 
+        TODO: 
             This method is not applicable to boxes across the 180th meridian (i.e. the 180° line).
 
         Args:
@@ -143,28 +146,35 @@ class RsiMetadataProcessor(object):
                 (lat - bbox[1]) / (bbox[3] - bbox[1] + RsiMetadataProcessor.EPS))
 
     @staticmethod
-    def json_utc_converter(s: int | float | str | pd.Timestamp | None) -> int:
-        if s is None:
-            return -1
-        elif isinstance(s, float):
-            return int(s)
-        elif isinstance(s, int):
-            return s
-        elif isinstance(s, pd.Timestamp):
-            return s.value // 10 ** 9
-        return RsiMetadataProcessor.convert_utcstr_to_timestamp(s, RsiMetadataProcessor.JSON_UTC_FORMAT)
+    def utc_converter_wrapper(format_str: str) -> callable:
+        '''
+        Wrap a UTC converter function with specified format string.
+
+        Args:
+            format_str: the UTC format string
+
+        Returns:
+            A callable converter
+        '''
+        def utc_converter(s: int | float | str | pd.Timestamp | None) -> int:
+            if s is None:
+                return -1
+            elif isinstance(s, float):
+                return int(s)
+            elif isinstance(s, int):
+                return s
+            elif isinstance(s, pd.Timestamp):
+                return s.value // 10 ** 9
+            return RsiMetadataProcessor.convert_utcstr_to_timestamp(s, format_str)
+        return utc_converter
 
     @staticmethod
-    def csv_utc_converter(s: int | float | str | pd.Timestamp | None) -> int:
-        if s is None:
-            return -1
-        elif isinstance(s, float):
-            return int(s)
-        elif isinstance(s, int):
-            return s
-        elif isinstance(s, pd.Timestamp):
-            return s.value // 10 ** 9
-        return RsiMetadataProcessor.convert_utcstr_to_timestamp(s, RsiMetadataProcessor.CSV_UTC_FORMAT)
+    def clear_cache() -> None:
+        '''
+        Clear the cache directory manually. Cache helps reduce calls from opensky.history().
+        '''
+        if os.path.exists(RsiMetadataProcessor.TARGET_SCENE_ID_PATH):
+            shutil.rmtree(RsiMetadataProcessor.TARGET_SCENE_ID_PATH)
 
     def query_historical_adsb(self, save_output: bool = False, output_dir: str = './target_scene_csv') -> dict:
         '''
@@ -239,12 +249,14 @@ class RsiMetadataProcessor(object):
                 columns=['alert', 'spi', 'squawk'])
 
             # Convert to UNIX timestamp
+            csv_utc_converter = RsiMetadataProcessor.utc_converter_wrapper(
+                RsiMetadataProcessor.CSV_UTC_FORMAT)
             target_adsb_df['last_position'] = target_adsb_df['last_position'].apply(
-                RsiMetadataProcessor.csv_utc_converter)
+                csv_utc_converter)
             target_adsb_df['hour'] = target_adsb_df['hour'].apply(
-                RsiMetadataProcessor.csv_utc_converter)
+                csv_utc_converter)
             target_adsb_df['timestamp'] = target_adsb_df['timestamp'].apply(
-                RsiMetadataProcessor.csv_utc_converter)
+                csv_utc_converter)
 
             # Drop rows with null ground speed
             target_adsb_df = target_adsb_df[target_adsb_df['groundspeed'].notnull(
@@ -268,11 +280,13 @@ class RsiMetadataProcessor(object):
         self.target_adsb_ids = dict()
         with open(self.fpath) as f:
             self.info = json.load(f)['RECORDS']
+        json_utc_converter = RsiMetadataProcessor.utc_converter_wrapper(
+            RsiMetadataProcessor.JSON_UTC_FORMAT)
         for record in self.info:
             record['group_name'] = record['sceneid'][:RsiMetadataProcessor.GROUP_NAME_LEN]
-            record['scenestarttime'] = RsiMetadataProcessor.json_utc_converter(
+            record['scenestarttime'] = json_utc_converter(
                 record['scenestarttime'])
-            record['sceneendtime'] = RsiMetadataProcessor.json_utc_converter(
+            record['sceneendtime'] = json_utc_converter(
                 record['sceneendtime'])
             record['spatialdata'], record['bbox'] = RsiMetadataProcessor.spatial_data_str_to_tuple(
                 record['spatialdata'])
@@ -368,7 +382,9 @@ class RsiMetadataProcessor(object):
         df = self.filtered_df
         assert (time_attribute in RsiMetadataProcessor.TIME_ATTRIBUTES)
         assert (rel in RsiMetadataProcessor.TIME_FILTER_RELS)
-        utc_timestamp = RsiMetadataProcessor.json_utc_converter(utc_time_str)
+        json_utc_converter = RsiMetadataProcessor.utc_converter_wrapper(
+            RsiMetadataProcessor.JSON_UTC_FORMAT)
+        utc_timestamp = json_utc_converter(utc_time_str)
         criteria = None
         if rel == 'gt':
             criteria = df[time_attribute] > utc_timestamp
@@ -398,7 +414,7 @@ class RsiMetadataProcessor(object):
             points) == 0 else np.any([RsiMetadataProcessor.check_if_inside_the_polygon(x, point) for point in points]))
         self.filtered_df = df[criteria]
         return self
-    
+
     def cloudcover_filter(self) -> "RsiMetadataProcessor":
         # TODO
         pass
@@ -407,10 +423,12 @@ class RsiMetadataProcessor(object):
 if __name__ == "__main__":
     GFDM_INFO_JSON_PATH = 'gt_m_cat_test.json'
 
-    rmp = RsiMetadataProcessor(GFDM_INFO_JSON_PATH)
+    RsiMetadataProcessor.clear_cache()
+    rmp = RsiMetadataProcessor(GFDM_INFO_JSON_PATH, drop_task_id=True)
     rmp.query_historical_adsb()
 
     new_df = rmp.join_with_target_adsb_on_group_name()
     new_df.to_csv('final.csv')
+
     final_df = rmp.group_and_count_plane()
     final_df.to_csv('final_sceneid.csv')
