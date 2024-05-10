@@ -53,6 +53,7 @@ class RsiMetadataProcessor(object):
 
         Args:
             utc_time (str): The formatted UTC time string.
+            format_str (str): The format string.
 
         Returns:
             An integer type of converted UNIX timestamp.
@@ -176,102 +177,6 @@ class RsiMetadataProcessor(object):
         if os.path.exists(RsiMetadataProcessor.TARGET_SCENE_ID_PATH):
             shutil.rmtree(RsiMetadataProcessor.TARGET_SCENE_ID_PATH)
 
-    def query_historical_adsb(self, save_output: bool = False, output_dir: str = './target_scene_csv') -> dict:
-        '''
-        Get historical flight information using cleaned JSON metadata by the API of `traffic`.
-
-        The JSON metadata is grouped by sceneid prefix [0:position_of_last_underscore] (e.g. 
-        DM01_PMS_013469_20230102_KS5M1_02_022 -> DM01_PMS_013469_20230102_KS5M1_02) and cleaned
-        during the initialization of the class. Each group will produce a CSV file containing
-        all ADS-B messages during the imaging period.
-
-        Note: if the data is too much, the inquiry may stuck occasionally. This issue is to be
-            troubleshot in the future. Just try more times with resume=True.
-
-        Args:
-            output_dir: the output directory path of saved CSV files.
-
-        Returns:
-            A dict whose keys are ids of scenes containing at least one plane and values are correlated pandas dataframe.
-        '''
-        df = self.get_groupby_df()
-        try:
-            if not os.path.exists(RsiMetadataProcessor.TARGET_SCENE_ID_PATH):
-                os.mkdir(RsiMetadataProcessor.TARGET_SCENE_ID_PATH)
-            shelve_fname = os.path.join(
-                RsiMetadataProcessor.TARGET_SCENE_ID_PATH, self.fname + '_' + self.id_suffix)
-            with shelve.open(shelve_fname, writeback=True) as db:
-                if 'target_adsb' not in db:
-                    db['target_adsb'] = dict()
-                with tqdm(total=df.shape[0] - len(db['target_adsb'])) as pbar:
-                    for index, row in df.iterrows():
-                        if index in db['target_adsb']:
-                            continue
-                        traffic = opensky.history(
-                            start=row['scenestarttime'],
-                            stop=row['sceneendtime'],
-                            bounds=row['bbox']
-                        )
-                        if traffic is not None:
-                            if save_output:
-                                if not os.path.exists(output_dir):
-                                    logger.warning(
-                                        f"The output path {output_dir} does not exist. Trying to mkdir.")
-                                    os.mkdir(output_dir)
-                                traffic.data.to_csv(os.path.join(
-                                    output_dir, f'{index}.csv'))
-                            db['target_adsb'][index] = traffic.data
-                            logger.info(
-                                f"{index} traffic information found and saved")
-                        time.sleep(0.1)
-                        pbar.update(1)
-                self.target_adsb_ids = dict(db['target_adsb'])
-                logger.debug(db['target_adsb'])
-        except Exception as e:
-            logger.exception(e)
-        return self.target_adsb_ids
-
-    def filter_target_adsb_df(self) -> pd.DataFrame:
-        data_head = None
-        if len(self.target_adsb_ids) > 0:
-            target_adsb_df_list = []
-            for scene_id, df in self.target_adsb_ids.items():
-                group_name = scene_id[:RsiMetadataProcessor.GROUP_NAME_LEN]
-                df['group_name'] = group_name
-                if data_head is None:
-                    data_head = df.columns.values
-                scene_list = df.to_numpy()
-                target_adsb_df_list.append(scene_list)
-
-            target_adsb_df = pd.DataFrame(
-                np.vstack(target_adsb_df_list), columns=data_head)
-            target_adsb_df = target_adsb_df.drop(
-                columns=['alert', 'spi', 'squawk'])
-
-            # Convert to UNIX timestamp
-            csv_utc_converter = RsiMetadataProcessor.utc_converter_wrapper(
-                RsiMetadataProcessor.CSV_UTC_FORMAT)
-            target_adsb_df['last_position'] = target_adsb_df['last_position'].apply(
-                csv_utc_converter)
-            target_adsb_df['hour'] = target_adsb_df['hour'].apply(
-                csv_utc_converter)
-            target_adsb_df['timestamp'] = target_adsb_df['timestamp'].apply(
-                csv_utc_converter)
-
-            # Drop rows with null ground speed
-            target_adsb_df = target_adsb_df[target_adsb_df['groundspeed'].notnull(
-            )]
-
-            # last_position denotes the last time when the ADS-B message of the plane is recorded
-            # This is to filter data recorded close to its last position
-            fresh_target_adsb_df = target_adsb_df.apply(lambda x: abs(x['last_position'] -
-                                                                      x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)
-            target_adsb_df = target_adsb_df[fresh_target_adsb_df]
-
-            return target_adsb_df
-        else:
-            return None
-
     def __init__(self, fpath: str, drop_task_id: bool = True) -> None:
         self.fpath = fpath
         self.fname, _ = os.path.splitext(os.path.basename(fpath))
@@ -317,15 +222,115 @@ class RsiMetadataProcessor(object):
         '''
         self.filtered_df = pd.DataFrame.copy(self.original_df)
 
-    def get_filtered_df(self) -> pd.DataFrame:
-        return self.filtered_df
+    def query_historical_adsb(self, save_output: bool = False, output_dir: str = './target_adsb_csv') -> dict:
+        '''
+        Get historical flight information using cleaned JSON metadata by the API of `traffic`.
 
-    def get_groupby_df(self) -> pd.DataFrame:
-        return self.groupby_df
+        The JSON metadata is grouped by sceneid prefix [0:position_of_last_underscore] (e.g. 
+        DM01_PMS_013469_20230102_KS5M1_02_022 -> DM01_PMS_013469_20230102_KS5M1_02) and cleaned
+        during the initialization of the class. Each group will produce a CSV file containing
+        all ADS-B messages during the imaging period.
+
+        Note: if the data is too much, the inquiry may stuck occasionally. This issue is to be
+            troubleshot in the future. Just try more times with resume=True.
+
+        Args:
+            save_output (bool): output the ADS-B dataframe in .csv format if true
+            output_dir: the output directory path of saved CSV files.
+
+        Returns:
+            A dict whose keys are ids of scenes containing at least one plane and values are correlated 
+            ADS-B pandas dataframe.
+        '''
+        df = self.groupby_df
+        try:
+            if not os.path.exists(RsiMetadataProcessor.TARGET_SCENE_ID_PATH):
+                os.mkdir(RsiMetadataProcessor.TARGET_SCENE_ID_PATH)
+            shelve_fname = os.path.join(
+                RsiMetadataProcessor.TARGET_SCENE_ID_PATH, self.fname + '_' + self.id_suffix)
+            with shelve.open(shelve_fname, writeback=True) as db:
+                if 'target_adsb' not in db:
+                    db['target_adsb'] = dict()
+                with tqdm(total=df.shape[0] - len(db['target_adsb'])) as pbar:
+                    for index, row in df.iterrows():
+                        if index in db['target_adsb']:
+                            continue
+                        traffic = opensky.history(
+                            start=row['scenestarttime'],
+                            stop=row['sceneendtime'],
+                            bounds=row['bbox']
+                        )
+                        if traffic is not None:
+                            if save_output:
+                                if not os.path.exists(output_dir):
+                                    logger.warning(
+                                        f"The output path {output_dir} does not exist. Trying to mkdir.")
+                                    os.mkdir(output_dir)
+                                traffic.data.to_csv(os.path.join(
+                                    output_dir, f'{index}.csv'))
+                            db['target_adsb'][index] = traffic.data
+                            logger.info(
+                                f"{index} traffic information found and saved")
+                        time.sleep(0.1)
+                        pbar.update(1)
+                self.target_adsb_ids = dict(db['target_adsb'])
+                logger.debug(db['target_adsb'])
+        except Exception as e:
+            logger.exception(e)
+        return self.target_adsb_ids
+
+    def filter_target_adsb_df(self) -> pd.DataFrame:
+        '''
+        Filter and clean the target ADS-B dataframe.
+
+        Returns:
+            the filtered and cleaned target ADS-B dataframe.
+        '''
+        data_head = None
+        if len(self.target_adsb_ids) > 0:
+            target_adsb_df_list = []
+            for scene_id, df in self.target_adsb_ids.items():
+                df['group_name'] = scene_id[:RsiMetadataProcessor.GROUP_NAME_LEN]
+                if data_head is None:
+                    data_head = df.columns.values
+                scene_list = df.to_numpy()
+                target_adsb_df_list.append(scene_list)
+
+            target_adsb_df = pd.DataFrame(
+                np.vstack(target_adsb_df_list), columns=data_head)
+            target_adsb_df = target_adsb_df.drop(
+                columns=['alert', 'spi', 'squawk'])
+
+            # Convert to UNIX timestamp
+            csv_utc_converter = RsiMetadataProcessor.utc_converter_wrapper(
+                RsiMetadataProcessor.CSV_UTC_FORMAT)
+            target_adsb_df['last_position'] = target_adsb_df['last_position'].apply(
+                csv_utc_converter)
+            target_adsb_df['hour'] = target_adsb_df['hour'].apply(
+                csv_utc_converter)
+            target_adsb_df['timestamp'] = target_adsb_df['timestamp'].apply(
+                csv_utc_converter)
+
+            # Drop rows with null ground speed
+            target_adsb_df = target_adsb_df[target_adsb_df['groundspeed'].notnull(
+            )]
+
+            # last_position denotes the last time when the ADS-B message of the plane is recorded
+            # This is to filter data recorded close to its last position
+            fresh_target_adsb_df = target_adsb_df.apply(lambda x: abs(x['last_position'] -
+                                                                      x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)
+            target_adsb_df = target_adsb_df[fresh_target_adsb_df]
+
+            return target_adsb_df
+        else:
+            return None
 
     def join_with_target_adsb_on_group_name(self) -> pd.DataFrame:
         '''
-        Join the original scene dataframe with target ADS-B dataframe on group_name
+        Join the original scene dataframe with target ADS-B dataframe on group_name。
+
+        Returns:
+            The joined dataframe. The dataframe is also filtered after joining.
         '''
         target_adsb_df = self.filter_target_adsb_df()
         if target_adsb_df is None:
@@ -347,6 +352,12 @@ class RsiMetadataProcessor(object):
         return self.group_name_join_df
 
     def group_and_count_plane(self) -> pd.DataFrame:
+        '''
+        Group the joined dataframe `group_name_join_df` by group_name and count the plane for each scene.
+
+        Returns:
+            the grouped dataframe with plane count.
+        '''
         if self.group_name_join_df is None:
             print("Joining with target ADS-B data on group_name should be called first")
             return None
@@ -371,7 +382,7 @@ class RsiMetadataProcessor(object):
         Filter records which satisfy the given time condition.
 
         Args:
-            time_attribute: time related attributes. Takes 'scenestarttime' or 'sceneendtime'.
+            time_attribute: time related attributes. Takes 'scenestarttime' or 'sceneendtime' only.
             rel: the comparator in the criteria. Takes 'gt'(greater than), 'ge'(greater than or equal to),
                 'equal', 'le'(less than or equal) and 'lt'(less than).
             utc_time_str: the UTC time string from JSON metadata in '%Y-%m-%dT%H:%M:%S'
