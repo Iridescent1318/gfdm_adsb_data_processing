@@ -204,6 +204,7 @@ class RsiMetadataProcessor(object):
         self.group_name_join_df = None
         self.plane_count_df = None
 
+        self.groupby_df_valid = True
         self.groupby_df = self.filtered_df.groupby('group_name').agg({
             'scenestarttime': 'min',
             'sceneendtime': 'max',
@@ -221,6 +222,28 @@ class RsiMetadataProcessor(object):
         Reset the query dataframe to initial data records.
         '''
         self.filtered_df = pd.DataFrame.copy(self.original_df)
+
+    def get_groupby_df(self) -> pd.DataFrame:
+        '''
+        Get `groupby_df`. If `groupby_df` is invalid due to time-/space-/cloudcover filters, re-groupby them.
+
+        Returns:
+            Valid `self.groupby_df`.
+        '''
+        if not self.groupby_df_valid:
+            self.groupby_df = self.filtered_df.groupby('group_name').agg({
+                'scenestarttime': 'min',
+                'sceneendtime': 'max',
+                'bbox': RsiMetadataProcessor.max_bounding_box,
+                'spatialdata': lambda x: x,
+                'sceneid': lambda x: x
+            })
+            self.groupby_df['starttimelist'] = self.filtered_df.groupby('group_name')[
+                'scenestarttime']
+            self.groupby_df['endtimelist'] = self.filtered_df.groupby('group_name')[
+                'sceneendtime']
+            self.groupby_df_valid = True
+        return self.groupby_df
 
     def query_historical_adsb(self, save_output: bool = False, output_dir: str = './target_adsb_csv') -> dict:
         '''
@@ -408,6 +431,8 @@ class RsiMetadataProcessor(object):
         elif rel == 'lt':
             criteria = df[time_attribute] < utc_timestamp
         self.filtered_df = df[criteria]
+        if self.groupby_df_valid:
+            self.groupby_df_valid = False
         return self
 
     def space_filter(self, points: Sequence[Sequence[T]], is_any: bool = True) -> "RsiMetadataProcessor":
@@ -427,6 +452,8 @@ class RsiMetadataProcessor(object):
         criteria = df['spatialdata'].apply(lambda x: True if len(
             points) == 0 else any_or_all([RsiMetadataProcessor.check_if_inside_the_polygon(x, point) for point in points]))
         self.filtered_df = df[criteria]
+        if self.groupby_df_valid:
+            self.groupby_df_valid = False
         return self
 
     def cloudcover_filter(self, threshold: float) -> "RsiMetadataProcessor":
@@ -448,6 +475,8 @@ if __name__ == "__main__":
 
     RsiMetadataProcessor.clear_cache()
     rmp = RsiMetadataProcessor(GFDM_INFO_JSON_PATH, drop_task_id=True)
+    # chain filter example
+    rmp.cloudcover_filter(0.2).cloudcover_filter(0.1).cloudcover_filter(0.05)
     rmp.query_historical_adsb()
 
     new_df = rmp.join_with_target_adsb_on_group_name()
