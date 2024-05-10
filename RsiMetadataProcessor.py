@@ -136,17 +136,19 @@ class RsiMetadataProcessor(object):
                 (lat - bbox[1]) / (bbox[3] - bbox[1] + RsiMetadataProcessor.EPS))
 
     @staticmethod
-    def json_utc_converter(s: int | float | str | None) -> int:
+    def json_utc_converter(s: int | float | str | pd.Timestamp | None) -> int:
         if s is None:
             return -1
         elif isinstance(s, float):
             return int(s)
         elif isinstance(s, int):
             return s
+        elif isinstance(s, pd.Timestamp):
+            return s.value // 10 ** 9
         return RsiMetadataProcessor.convert_utcstr_to_timestamp(s, RsiMetadataProcessor.JSON_UTC_FORMAT)
 
     @staticmethod
-    def csv_utc_converter(s: int | float | str | None) -> int:
+    def csv_utc_converter(s: int | float | str | pd.Timestamp | None) -> int:
         if s is None:
             return -1
         elif isinstance(s, float):
