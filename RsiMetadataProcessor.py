@@ -204,16 +204,16 @@ class RsiMetadataProcessor(object):
         self.group_name_join_df = None
         self.plane_count_df = None
 
-        self.groupby_df = self.original_df.groupby('group_name').agg({
+        self.groupby_df = self.filtered_df.groupby('group_name').agg({
             'scenestarttime': 'min',
             'sceneendtime': 'max',
             'bbox': RsiMetadataProcessor.max_bounding_box,
             'spatialdata': lambda x: x,
             'sceneid': lambda x: x
         })
-        self.groupby_df['starttimelist'] = self.original_df.groupby('group_name')[
+        self.groupby_df['starttimelist'] = self.filtered_df.groupby('group_name')[
             'scenestarttime']
-        self.groupby_df['endtimelist'] = self.original_df.groupby('group_name')[
+        self.groupby_df['endtimelist'] = self.filtered_df.groupby('group_name')[
             'sceneendtime']
 
     def reset_filtered_df(self) -> None:
@@ -327,7 +327,7 @@ class RsiMetadataProcessor(object):
 
     def join_with_target_adsb_on_group_name(self) -> pd.DataFrame:
         '''
-        Join the original scene dataframe with target ADS-B dataframe on group_name。
+        Join the space-/time-/cloudcover-filtered scene dataframe with target ADS-B dataframe on group_name。
 
         Returns:
             The joined dataframe. The dataframe is also filtered after joining.
@@ -336,7 +336,7 @@ class RsiMetadataProcessor(object):
         if target_adsb_df is None:
             return None
         # Right join with target_adsb_df
-        group_name_join_df = self.original_df.merge(
+        group_name_join_df = self.filtered_df.merge(
             target_adsb_df, how='right', on='group_name')
         # Filter timestamp within the scene time period
         group_name_join_df = group_name_join_df[group_name_join_df.apply(lambda x: abs(x['scenestarttime'] - x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF and abs(
@@ -410,25 +410,37 @@ class RsiMetadataProcessor(object):
         self.filtered_df = df[criteria]
         return self
 
-    def space_filter(self, points: Sequence[Sequence[T]]) -> "RsiMetadataProcessor":
+    def space_filter(self, points: Sequence[Sequence[T]], is_any: bool = True) -> "RsiMetadataProcessor":
         '''
-        Filter records which contain at least one point from the input points.
+        Filter records which contain points in `points`.
 
         Args:
             points: a sequence of input points.
+            is_any: if true, records containing at least one point from the input `points`;
+                otherwise only records containing all `points` will be kept.
 
         Returns:
             The object itself (to support method chaining).
         '''
         df = self.filtered_df
+        any_or_all: callable = np.any if is_any else np.all
         criteria = df['spatialdata'].apply(lambda x: True if len(
-            points) == 0 else np.any([RsiMetadataProcessor.check_if_inside_the_polygon(x, point) for point in points]))
+            points) == 0 else any_or_all([RsiMetadataProcessor.check_if_inside_the_polygon(x, point) for point in points]))
         self.filtered_df = df[criteria]
         return self
 
-    def cloudcover_filter(self) -> "RsiMetadataProcessor":
+    def cloudcover_filter(self, threshold: float) -> "RsiMetadataProcessor":
+        '''
+        Filter records whose cloudcover is higher than the given threshold.
+
+        Args:
+            threshold: the cloudcover threshold
+
+        Returns:
+            The object itself (to support method chaining)
+        '''
         # TODO
-        pass
+        return self
 
 
 if __name__ == "__main__":
