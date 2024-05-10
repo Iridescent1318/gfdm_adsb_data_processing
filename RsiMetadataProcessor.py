@@ -179,7 +179,8 @@ class RsiMetadataProcessor(object):
         try:
             if not os.path.exists(RsiMetadataProcessor.TARGET_SCENE_ID_PATH):
                 os.mkdir(RsiMetadataProcessor.TARGET_SCENE_ID_PATH)
-            shelve_fname = os.path.join(RsiMetadataProcessor.TARGET_SCENE_ID_PATH, self.fname + '_' + self.id_suffix)
+            shelve_fname = os.path.join(
+                RsiMetadataProcessor.TARGET_SCENE_ID_PATH, self.fname + '_' + self.id_suffix)
             with shelve.open(shelve_fname, writeback=True) as db:
                 if 'target_scene_ids' not in db:
                     db['target_scene_ids'] = dict()
@@ -266,8 +267,10 @@ class RsiMetadataProcessor(object):
                 scene_list = df.to_numpy()
                 target_scene_df_list.append(scene_list)
 
-            target_scene_df = pd.DataFrame(np.vstack(target_scene_df_list), columns=data_head)
-            target_scene_df = target_scene_df.drop(columns=['alert', 'spi', 'squawk'])
+            target_scene_df = pd.DataFrame(
+                np.vstack(target_scene_df_list), columns=data_head)
+            target_scene_df = target_scene_df.drop(
+                columns=['alert', 'spi', 'squawk'])
             # Convert to UNIX timestamp
             target_scene_df['last_position'] = target_scene_df['last_position'].apply(
                 RsiMetadataProcessor.csv_utc_converter)
@@ -276,17 +279,17 @@ class RsiMetadataProcessor(object):
             target_scene_df['timestamp'] = target_scene_df['timestamp'].apply(
                 RsiMetadataProcessor.csv_utc_converter)
             # Drop rows with null ground speed
-            target_scene_df = target_scene_df[target_scene_df['groundspeed'].notnull()]
+            target_scene_df = target_scene_df[target_scene_df['groundspeed'].notnull(
+            )]
             # last_position denotes the last time when the ADS-B message of the plane is recorded
             # This is to filter 'fresh' messages
             fresh_target_scene_df = target_scene_df.apply(lambda x: abs(x['last_position'] -
-                                x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)
+                                                                        x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)
             target_scene_df = target_scene_df[fresh_target_scene_df]
 
             return target_scene_df
         else:
             return None
-
 
     def __init__(self, fpath) -> None:
         self.fpath = fpath
@@ -305,19 +308,19 @@ class RsiMetadataProcessor(object):
             record['spatialdata'], record['bbox'] = RsiMetadataProcessor.convert_sds_to_tuple(
                 record['spatialdata'])
 
-        self.info_df = pd.DataFrame.from_dict(self.info)
-        self.query_df = pd.DataFrame.copy(self.info_df)
+        self.original_df = pd.DataFrame.from_dict(self.info)
+        self.query_df = pd.DataFrame.copy(self.original_df)
 
-        self.groupby_df = self.info_df.groupby('group_name').agg({
+        self.groupby_df = self.original_df.groupby('group_name').agg({
             'scenestarttime': 'min',
             'sceneendtime': 'max',
             'bbox': RsiMetadataProcessor.get_max_bbox_tuple,
             'spatialdata': lambda x: x,
             'sceneid': lambda x: x
         })
-        self.groupby_df['starttimelist'] = self.info_df.groupby('group_name')[
+        self.groupby_df['starttimelist'] = self.original_df.groupby('group_name')[
             'scenestarttime']
-        self.groupby_df['endtimelist'] = self.info_df.groupby('group_name')[
+        self.groupby_df['endtimelist'] = self.original_df.groupby('group_name')[
             'sceneendtime']
 
         self.filter_list = []
@@ -326,7 +329,7 @@ class RsiMetadataProcessor(object):
         '''
         Reset the query dataframe to initial data records.
         '''
-        self.query_df = pd.DataFrame.copy(self.info_df)
+        self.query_df = pd.DataFrame.copy(self.original_df)
 
     def get_query_df(self) -> pd.DataFrame:
         return self.query_df
@@ -335,7 +338,7 @@ class RsiMetadataProcessor(object):
         return self.groupby_df
 
     def get_info_df_dropping_task_id(self) -> pd.DataFrame:
-        return pd.DataFrame.copy(self.info_df).drop(columns=['jobtaskid', 'satelliteid'])
+        return pd.DataFrame.copy(self.original_df).drop(columns=['jobtaskid', 'satelliteid'])
 
     def time_filter(self, time_attribute: str, rel: str, utc_time_str: str) -> "RsiMetadataProcessor":
         '''
@@ -386,7 +389,7 @@ class RsiMetadataProcessor(object):
 
 
 def get_gfdm_df(rsi_metadata_processor: RsiMetadataProcessor) -> pd.DataFrame:
-    gfdm_df = rsi_metadata_processor.info_df
+    gfdm_df = rsi_metadata_processor.original_df
     gfdm_df = gfdm_df.drop(columns=['jobtaskid', 'satelliteid'])
     return gfdm_df
 
@@ -422,8 +425,8 @@ def get_groupby_df(cleaned_df: pd.DataFrame) -> pd.DataFrame:
 
 if __name__ == "__main__":
     GFDM_INFO_JSON_PATH = 'gt_m_cat_test.json'
-    rmp = RsiMetadataProcessor(GFDM_INFO_JSON_PATH)
 
+    rmp = RsiMetadataProcessor(GFDM_INFO_JSON_PATH)
     rmp.query_historical_adsb()
 
     gfdm_df = get_gfdm_df(rmp)
