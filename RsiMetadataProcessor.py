@@ -15,9 +15,8 @@ from traffic.data import opensky
 from tqdm import tqdm
 
 T = TypeVar('T')
-# logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.WARNING)
+logging.config.fileConfig('logging.conf')
+logger = logging.getLogger('RsiMetadataProcessor')
 
 
 class RsiMetadataProcessor(object):
@@ -274,8 +273,10 @@ class RsiMetadataProcessor(object):
             with shelve.open(shelve_fname, writeback=True) as db:
                 if 'target_adsb' not in db:
                     db['target_adsb'] = dict()
-                with tqdm(total=df.shape[0] - len(db['target_adsb'])) as pbar:
+                with tqdm(total=df.shape[0] - len(db['target_adsb']), desc="Historical ADS-B Query") as pbar:
                     for index, row in df.iterrows():
+                        pbar.set_description(
+                            f"Historical ADS-B Query - {index}")
                         if index in db['target_adsb']:
                             continue
                         traffic = opensky.history(
@@ -293,7 +294,7 @@ class RsiMetadataProcessor(object):
                                     output_dir, f'{index}.csv'))
                             db['target_adsb'][index] = traffic.data
                             logger.info(
-                                f"{index} traffic information found and saved")
+                                f"{index} found traffic information.")
                         time.sleep(0.1)
                         pbar.update(1)
                 self.target_adsb_ids = dict(db['target_adsb'])
@@ -477,7 +478,7 @@ if __name__ == "__main__":
     rmp = RsiMetadataProcessor(GFDM_INFO_JSON_PATH, drop_task_id=True)
     # chain filter example
     rmp.cloudcover_filter(0.2).cloudcover_filter(0.1).cloudcover_filter(0.05)
-    rmp.query_historical_adsb()
+    rmp.query_historical_adsb(save_output=True)
 
     new_df = rmp.join_with_target_adsb_on_group_name()
     new_df.to_csv('final.csv')
