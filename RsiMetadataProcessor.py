@@ -25,12 +25,19 @@ class RsiMetadataProcessor(object):
 
     Attributes:
         fpath (str): the filepath of the JSON file.
+        fname (str): the filename (without extension) of the JSON file.
+        id_suffix (str): a hashed suffix for naming in shelve module.
+        target_adsb_ids (dict): saved target scene ids and corresponding dataframes.
+        original_df (pd.Dataframe): original dataframe from the given JSON file.
+        filtered_df (pd.Dataframe): filtered dataframe from the original one.
+        groupby_df (pd.Dataframe): grouped version of the original one.
     '''
     TARGET_SCENE_ID_PATH = 'rmp_cache'
     TIME_ATTRIBUTES = {'scenestarttime', 'sceneendtime'}
     TIME_FILTER_RELS = {'lt', 'le', 'equal', 'ge', 'gt'}
     TIME_DIFF = 1
     EPS = 1e-6
+    GROUP_NAME_LEN = 33
     JSON_UTC_FORMAT = '%Y-%m-%dT%H:%M:%S.%f'
     CSV_UTC_FORMAT = '%Y-%m-%d %H:%M:%S.%f'
 
@@ -53,7 +60,7 @@ class RsiMetadataProcessor(object):
         return int(dt.timestamp())
 
     @staticmethod
-    def convert_sds_to_tuple(spatial_data_str: str) -> Tuple[Tuple[Tuple[T]], Tuple[T]]:
+    def spatial_data_str_to_tuple(spatial_data_str: str) -> Tuple[Tuple[Tuple[T]], Tuple[T]]:
         '''
         Convert a spatial data string containing four longitude-latitude coordinates to a 
         four-element tuple (min_longitude, min_latitude, max_longitude, max_latitude).
@@ -76,7 +83,7 @@ class RsiMetadataProcessor(object):
         return pt_tuples, (min_lon, min_lat, max_lon, max_lat)
 
     @staticmethod
-    def get_max_bbox_tuple(bbox_list: Sequence[Sequence[T]]) -> Tuple[T]:
+    def max_bounding_box(bbox_list: Sequence[Sequence[T]]) -> Tuple[T]:
         '''
         Given a list of an oblique bounding box coordinates, return its minimal circumscribed rectangle 
         whose edges are parallel to lines of longitude and latitude.
@@ -119,7 +126,7 @@ class RsiMetadataProcessor(object):
         return polygon_shape.contains(point_shape)
 
     @staticmethod
-    def get_bbox_rel_pos(bbox: Sequence[Sequence[T]], lon: T, lat: T) -> Tuple[T]:
+    def rel_pos_in_bbox(bbox: Sequence[Sequence[T]], lon: T, lat: T) -> Tuple[T]:
         '''
         Get the relative position of a given lon-lat coordinate in a bounding box
 
@@ -184,11 +191,11 @@ class RsiMetadataProcessor(object):
             shelve_fname = os.path.join(
                 RsiMetadataProcessor.TARGET_SCENE_ID_PATH, self.fname + '_' + self.id_suffix)
             with shelve.open(shelve_fname, writeback=True) as db:
-                if 'target_scene_ids' not in db:
-                    db['target_scene_ids'] = dict()
-                with tqdm(total=df.shape[0] - len(db['target_scene_ids'])) as pbar:
+                if 'target_adsb' not in db:
+                    db['target_adsb'] = dict()
+                with tqdm(total=df.shape[0] - len(db['target_adsb'])) as pbar:
                     for index, row in df.iterrows():
-                        if index in db['target_scene_ids']:
+                        if index in db['target_adsb']:
                             continue
                         traffic = opensky.history(
                             start=row['scenestarttime'],
@@ -203,120 +210,85 @@ class RsiMetadataProcessor(object):
                                     os.mkdir(output_dir)
                                 traffic.data.to_csv(os.path.join(
                                     output_dir, f'{index}.csv'))
-                            db['target_scene_ids'][index] = traffic.data
+                            db['target_adsb'][index] = traffic.data
                             logger.info(
                                 f"{index} traffic information found and saved")
                         time.sleep(0.1)
                         pbar.update(1)
-                self.target_scene_ids = dict(db['target_scene_ids'])
-                logger.debug(db['target_scene_ids'])
+                self.target_adsb_ids = dict(db['target_adsb'])
+                logger.debug(db['target_adsb'])
         except Exception as e:
             logger.exception(e)
-        return self.target_scene_ids
+        return self.target_adsb_ids
 
-    @staticmethod
-    def process_queried_csv(csv_dir_path: str) -> pd.DataFrame:
-        '''
-        Process all the CSV files produced by opensky_query().
-
-        Args:
-            csv_dir_path: the CSV file directory path.
-
-        Returns:
-            A pandas dataframe containing cleaned flight data.
-        '''
-        file_list = os.listdir(csv_dir_path)
-        np_list = []
+    def filter_target_adsb_df(self) -> pd.DataFrame:
         data_head = None
-        for fl in file_list:
-            fname = fl[:33]
-            file_df = pd.read_csv(os.path.join(csv_dir_path, fl))
-            file_df['group_name'] = fname
-            if data_head is None:
-                data_head = file_df.columns.values
-            file_list = file_df.to_numpy()
-            np_list.append(file_list)
-        np_stack_list = np.vstack(np_list)
-
-        # Convert to dataframe and cleaning
-        ret = pd.DataFrame(np_stack_list, columns=data_head)
-        ret = ret.drop(columns=['Unnamed: 0', 'alert', 'spi', 'squawk'])
-        # Convert to UNIX timestamp
-        ret['last_position'] = ret['last_position'].apply(
-            RsiMetadataProcessor.csv_utc_converter)
-        ret['hour'] = ret['hour'].apply(
-            RsiMetadataProcessor.csv_utc_converter)
-        ret['timestamp'] = ret['timestamp'].apply(
-            RsiMetadataProcessor.csv_utc_converter)
-        # Drop rows with null ground speed
-        ret = ret[ret['groundspeed'].notnull()]
-        # last_position denotes the last time when the ADS-B message of the plane is recorded
-        # This is to filter 'fresh' messages
-        ret = ret[ret.apply(lambda x: abs(x['last_position'] -
-                            x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)]
-
-        return ret
-
-    def filter_target_scenes(self) -> pd.DataFrame:
-        data_head = None
-        if len(self.target_scene_ids) > 0:
-            target_scene_df_list = []
-            for scene_id, df in self.target_scene_ids.items():
-                group_name = scene_id[:33]
+        if len(self.target_adsb_ids) > 0:
+            target_adsb_df_list = []
+            for scene_id, df in self.target_adsb_ids.items():
+                group_name = scene_id[:RsiMetadataProcessor.GROUP_NAME_LEN]
                 df['group_name'] = group_name
                 if data_head is None:
                     data_head = df.columns.values
                 scene_list = df.to_numpy()
-                target_scene_df_list.append(scene_list)
+                target_adsb_df_list.append(scene_list)
 
-            target_scene_df = pd.DataFrame(
-                np.vstack(target_scene_df_list), columns=data_head)
-            target_scene_df = target_scene_df.drop(
+            target_adsb_df = pd.DataFrame(
+                np.vstack(target_adsb_df_list), columns=data_head)
+            target_adsb_df = target_adsb_df.drop(
                 columns=['alert', 'spi', 'squawk'])
-            # Convert to UNIX timestamp
-            target_scene_df['last_position'] = target_scene_df['last_position'].apply(
-                RsiMetadataProcessor.csv_utc_converter)
-            target_scene_df['hour'] = target_scene_df['hour'].apply(
-                RsiMetadataProcessor.csv_utc_converter)
-            target_scene_df['timestamp'] = target_scene_df['timestamp'].apply(
-                RsiMetadataProcessor.csv_utc_converter)
-            # Drop rows with null ground speed
-            target_scene_df = target_scene_df[target_scene_df['groundspeed'].notnull(
-            )]
-            # last_position denotes the last time when the ADS-B message of the plane is recorded
-            # This is to filter 'fresh' messages
-            fresh_target_scene_df = target_scene_df.apply(lambda x: abs(x['last_position'] -
-                                                                        x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)
-            target_scene_df = target_scene_df[fresh_target_scene_df]
 
-            return target_scene_df
+            # Convert to UNIX timestamp
+            target_adsb_df['last_position'] = target_adsb_df['last_position'].apply(
+                RsiMetadataProcessor.csv_utc_converter)
+            target_adsb_df['hour'] = target_adsb_df['hour'].apply(
+                RsiMetadataProcessor.csv_utc_converter)
+            target_adsb_df['timestamp'] = target_adsb_df['timestamp'].apply(
+                RsiMetadataProcessor.csv_utc_converter)
+
+            # Drop rows with null ground speed
+            target_adsb_df = target_adsb_df[target_adsb_df['groundspeed'].notnull(
+            )]
+
+            # last_position denotes the last time when the ADS-B message of the plane is recorded
+            # This is to filter data recorded close to its last position
+            fresh_target_adsb_df = target_adsb_df.apply(lambda x: abs(x['last_position'] -
+                                                                      x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)
+            target_adsb_df = target_adsb_df[fresh_target_adsb_df]
+
+            return target_adsb_df
         else:
             return None
 
-    def __init__(self, fpath) -> None:
+    def __init__(self, fpath: str, drop_task_id: bool = True) -> None:
         self.fpath = fpath
         self.fname, _ = os.path.splitext(os.path.basename(fpath))
         self.id_suffix = hashlib.md5(
             self.fname.encode("utf-8")).hexdigest()[-4:]
-        self.target_scene_ids = dict()
+        self.target_adsb_ids = dict()
         with open(self.fpath) as f:
             self.info = json.load(f)['RECORDS']
         for record in self.info:
-            record['group_name'] = record['sceneid'][:33]
+            record['group_name'] = record['sceneid'][:RsiMetadataProcessor.GROUP_NAME_LEN]
             record['scenestarttime'] = RsiMetadataProcessor.json_utc_converter(
                 record['scenestarttime'])
             record['sceneendtime'] = RsiMetadataProcessor.json_utc_converter(
                 record['sceneendtime'])
-            record['spatialdata'], record['bbox'] = RsiMetadataProcessor.convert_sds_to_tuple(
+            record['spatialdata'], record['bbox'] = RsiMetadataProcessor.spatial_data_str_to_tuple(
                 record['spatialdata'])
 
         self.original_df = pd.DataFrame.from_dict(self.info)
-        self.query_df = pd.DataFrame.copy(self.original_df)
+        if drop_task_id:
+            self.original_df = self.original_df.drop(
+                columns=['jobtaskid', 'satelliteid'])
+        self.filtered_df = pd.DataFrame.copy(self.original_df)
+        self.group_name_join_df = None
+        self.plane_count_df = None
 
         self.groupby_df = self.original_df.groupby('group_name').agg({
             'scenestarttime': 'min',
             'sceneendtime': 'max',
-            'bbox': RsiMetadataProcessor.get_max_bbox_tuple,
+            'bbox': RsiMetadataProcessor.max_bounding_box,
             'spatialdata': lambda x: x,
             'sceneid': lambda x: x
         })
@@ -325,22 +297,60 @@ class RsiMetadataProcessor(object):
         self.groupby_df['endtimelist'] = self.original_df.groupby('group_name')[
             'sceneendtime']
 
-        self.filter_list = []
-
-    def reset_query(self) -> None:
+    def reset_filtered_df(self) -> None:
         '''
         Reset the query dataframe to initial data records.
         '''
-        self.query_df = pd.DataFrame.copy(self.original_df)
+        self.filtered_df = pd.DataFrame.copy(self.original_df)
 
-    def get_query_df(self) -> pd.DataFrame:
-        return self.query_df
+    def get_filtered_df(self) -> pd.DataFrame:
+        return self.filtered_df
 
     def get_groupby_df(self) -> pd.DataFrame:
         return self.groupby_df
 
-    def get_info_df_dropping_task_id(self) -> pd.DataFrame:
-        return pd.DataFrame.copy(self.original_df).drop(columns=['jobtaskid', 'satelliteid'])
+    def join_with_target_adsb_on_group_name(self) -> pd.DataFrame:
+        '''
+        Join the original scene dataframe with target ADS-B dataframe on group_name
+        '''
+        target_adsb_df = self.filter_target_adsb_df()
+        if target_adsb_df is None:
+            return None
+        # Right join with target_adsb_df
+        group_name_join_df = self.original_df.merge(
+            target_adsb_df, how='right', on='group_name')
+        # Filter timestamp within the scene time period
+        group_name_join_df = group_name_join_df[group_name_join_df.apply(lambda x: abs(x['scenestarttime'] - x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF and abs(
+            x['sceneendtime'] - x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)]
+        # Filter scenes with adsb inside the scene region
+        group_name_join_df = group_name_join_df[group_name_join_df.apply(lambda x: RsiMetadataProcessor.check_if_inside_the_polygon(
+            x['spatialdata'], (x['longitude'], x['latitude'])), axis=1)]
+        group_name_join_df['diff'] = group_name_join_df.apply(
+            lambda x: x['timestamp'] - x['scenestarttime'], axis=1)
+        group_name_join_df['rel_pos'] = group_name_join_df.apply(lambda x: RsiMetadataProcessor.rel_pos_in_bbox(
+            x['bbox'], x['longitude'], x['latitude']), axis=1)
+        self.group_name_join_df = group_name_join_df
+        return self.group_name_join_df
+
+    def group_and_count_plane(self) -> pd.DataFrame:
+        if self.group_name_join_df is None:
+            print("Joining with target ADS-B data on group_name should be called first")
+            return None
+        grouped_df = self.group_name_join_df.groupby('sceneid')
+        grouped_df_with_plane_count = grouped_df.agg({
+            'scenestarttime': 'min',
+            'sceneendtime': 'max',
+            # 'bbox': lambda x: x[0],
+            # 'spatialdata': lambda x: x,
+            # 'sceneid': lambda x: x
+            'rel_pos': lambda x: x
+        })
+        grouped_df_with_plane_count['plane_count'] = grouped_df.agg({
+            'icao24': lambda x: len(set(x)),
+        })
+        self.plane_count_df = grouped_df_with_plane_count.sort_values(
+            by='plane_count', ascending=False)
+        return self.plane_count_df
 
     def time_filter(self, time_attribute: str, rel: str, utc_time_str: str) -> "RsiMetadataProcessor":
         '''
@@ -355,7 +365,7 @@ class RsiMetadataProcessor(object):
         Returns:
             The object itself (to support method chaining).
         '''
-        df = self.query_df
+        df = self.filtered_df
         assert (time_attribute in RsiMetadataProcessor.TIME_ATTRIBUTES)
         assert (rel in RsiMetadataProcessor.TIME_FILTER_RELS)
         utc_timestamp = RsiMetadataProcessor.json_utc_converter(utc_time_str)
@@ -370,7 +380,7 @@ class RsiMetadataProcessor(object):
             criteria = df[time_attribute] <= utc_timestamp
         elif rel == 'lt':
             criteria = df[time_attribute] < utc_timestamp
-        self.query_df = df[criteria]
+        self.filtered_df = df[criteria]
         return self
 
     def space_filter(self, points: Sequence[Sequence[T]]) -> "RsiMetadataProcessor":
@@ -383,46 +393,15 @@ class RsiMetadataProcessor(object):
         Returns:
             The object itself (to support method chaining).
         '''
-        df = self.query_df
+        df = self.filtered_df
         criteria = df['spatialdata'].apply(lambda x: True if len(
             points) == 0 else np.any([RsiMetadataProcessor.check_if_inside_the_polygon(x, point) for point in points]))
-        self.query_df = df[criteria]
+        self.filtered_df = df[criteria]
         return self
-
-
-def get_gfdm_df(rsi_metadata_processor: RsiMetadataProcessor) -> pd.DataFrame:
-    gfdm_df = rsi_metadata_processor.original_df
-    gfdm_df = gfdm_df.drop(columns=['jobtaskid', 'satelliteid'])
-    return gfdm_df
-
-
-def get_cleaned_df(gfdm_df: pd.DataFrame, np_df: pd.DataFrame) -> pd.DataFrame:
-    new_df = gfdm_df.merge(np_df, how='right', on='group_name')
-    new_df = new_df[new_df.apply(lambda x: abs(x['scenestarttime'] - x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF and abs(
-        x['sceneendtime'] - x['timestamp']) <= RsiMetadataProcessor.TIME_DIFF, axis=1)]
-    new_df = new_df[new_df.apply(lambda x: RsiMetadataProcessor.check_if_inside_the_polygon(
-        x['spatialdata'], (x['longitude'], x['latitude'])), axis=1)]
-    new_df['diff'] = new_df.apply(
-        lambda x: x['timestamp'] - x['scenestarttime'], axis=1)
-    new_df['rel_pos'] = new_df.apply(lambda x: RsiMetadataProcessor.get_bbox_rel_pos(
-        x['bbox'], x['longitude'], x['latitude']), axis=1)
-    return new_df
-
-
-def get_groupby_df(cleaned_df: pd.DataFrame) -> pd.DataFrame:
-    ndf_groupby = cleaned_df.groupby('sceneid')
-    ndf = ndf_groupby.agg({
-        'scenestarttime': 'min',
-        'sceneendtime': 'max',
-        # 'bbox': lambda x: x[0],
-        # 'spatialdata': lambda x: x,
-        # 'sceneid': lambda x: x
-        'rel_pos': lambda x: x
-    })
-    ndf['plane_count'] = ndf_groupby.agg({
-        'icao24': lambda x: len(set(x)),
-    })
-    return ndf.sort_values(by='plane_count', ascending=False)
+    
+    def cloudcover_filter(self) -> "RsiMetadataProcessor":
+        # TODO
+        pass
 
 
 if __name__ == "__main__":
@@ -431,13 +410,7 @@ if __name__ == "__main__":
     rmp = RsiMetadataProcessor(GFDM_INFO_JSON_PATH)
     rmp.query_historical_adsb()
 
-    gfdm_df = get_gfdm_df(rmp)
-    logging.debug(gfdm_df)
-    np_df = rmp.filter_target_scenes()
-    logging.debug(np_df)
-    new_df = get_cleaned_df(gfdm_df, np_df)
-    logging.debug(new_df)
-
+    new_df = rmp.join_with_target_adsb_on_group_name()
     new_df.to_csv('final.csv')
-    final_df = get_groupby_df(new_df)
+    final_df = rmp.group_and_count_plane()
     final_df.to_csv('final_sceneid.csv')
