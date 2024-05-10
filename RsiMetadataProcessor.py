@@ -175,6 +175,7 @@ class RsiMetadataProcessor(object):
         '''
         if os.path.exists(RsiMetadataProcessor.TARGET_SCENE_ID_PATH):
             shutil.rmtree(RsiMetadataProcessor.TARGET_SCENE_ID_PATH)
+            logger.info("Cache cleared.")
 
     def __init__(self, fpath: str, drop_task_id: bool = True) -> None:
         self.fpath = fpath
